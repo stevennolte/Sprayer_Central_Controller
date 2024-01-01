@@ -13,6 +13,8 @@
 #include <Adafruit_PWMServoDriver.h>
 #include <ezOutput.h>
 #include <TaskScheduler.h>
+#include <Adafruit_ADS1X15.h>
+
 #include <SPI.h>
 // CONSTANTS ///////////////////////////////////////////////////
 const char* ssid     = "SSEI";
@@ -42,8 +44,8 @@ const uint8_t SECTION_5_PIN = 3;
 // CLASSES /////////////////////////////////////////////////////
 
 
- //default address 0x40
 
+Adafruit_ADS1015 ads; 
 AsyncUDP udp;
 IPAddress local_IP(192, 168, 0, 123);
 IPAddress gateway(192, 168, 0, 1);
@@ -60,10 +62,30 @@ struct debugMsgs_t{
 
 // VARIABLES ///////////////////////////////////////////////////
 int debugTimer = 0;
+int rows = 0;
 // INCOMING UDP STRUCTS ////////////////////////////////////////
 
+struct __attribute__ ((packed)) rowStatesStruct_t{
+  uint8_t row1:1;
+  uint8_t row2:1;
+  uint8_t row3:1;
+  uint8_t row4:1;
+  uint8_t row5:1;
+  uint8_t row6:1;
+  uint8_t row7:1;
+  uint8_t row8:1;
+};
+
+union rowStates_u{
+  rowStatesStruct_t rowStatsStruct;
+  uint8_t bytes[1];
+} rowStates;
 
 // OUTGOING UDP STRUCTS ////////////////////////////////////////
+struct sensorData_t{
+  uint32_t railPressure;
+};
+sensorData_t sensorData;
 
 
 // INTERNAL STRUCTS ////////////////////////////////////////////
@@ -72,6 +94,7 @@ struct programStates_t{
   bool adsConnected;
   bool udpConnected;
   uint32_t udpTimer;
+  
 
 } programStates;
 
@@ -86,27 +109,27 @@ struct cmdData_t{
 
 
 void IRAM_ATTR pulseCountMain(){
-  Serial.println("pulse");
+  
   return;
 }
 void IRAM_ATTR pulseCountSec1(){
-  Serial.println("pulse");
+  
   return;
 }
 void IRAM_ATTR pulseCountSec2(){
-  Serial.println("pulse");
+  
   return;
 }
 void IRAM_ATTR pulseCountSec3(){
-  Serial.println("pulse");
+ 
   return;
 }
 void IRAM_ATTR pulseCountSec4(){
-  Serial.println("pulse");
+
   return;
 }
 void IRAM_ATTR pulseCountSec5(){
-  Serial.println("pulse");
+
   return;
 }
 void interruptSetup(){
@@ -124,6 +147,38 @@ void interruptSetup(){
   attachInterrupt(digitalPinToInterrupt(SECTION_5_PIN), pulseCountSec5, RISING);
 }
 
+class VoltageMonitor{
+  public:
+    VoltageMonitor(){
+
+    }
+
+    void init(){
+      byte error;
+      Wire.beginTransmission(0x48);
+      error = Wire.endTransmission();
+      if (error == 0){
+        Adafruit_ADS1015 ads;    //default address 0x48
+        if (!ads.begin()) {
+          Serial.println("Failed to initialize ADS.");
+          programStates.adsConnected = false;
+        }
+        programStates.adsConnected = true;
+      } else {
+        programStates.adsConnected = false;
+        Serial.println(error);
+        Serial.println("ads not connected");
+      }
+    }
+
+    void getVoltages(){
+      if (programStates.adsConnected == true){
+        sensorData.railPressure = ads.readADC_SingleEnded(0);
+      }
+    }
+};
+VoltageMonitor voltMon = VoltageMonitor();
+
 class PWMDriver{
   public:
     PWMDriver(){
@@ -133,10 +188,10 @@ class PWMDriver{
       Wire.beginTransmission(0x40);
       error = Wire.endTransmission();
       if (error == 0){
-        // Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
-        // pwm.begin();
-        // pwm.setOscillatorFrequency(27000000);
-        // pwm.setPWMFreq(150);
+        Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();   //default address 0x40
+        pwm.begin();
+        pwm.setOscillatorFrequency(27000000);
+        pwm.setPWMFreq(150);
         programStates.pwmDriverConnected = true;
       } else {
         programStates.pwmDriverConnected = false;
@@ -196,6 +251,20 @@ class UDPMethods{
               // debugMsgs[(int)(sizeof(debugMsgs))].debugName="avgSpeed";
               // debugMsgs[1].debugValue=cmdData.avgSpeed;
               break;
+            case 229:
+              cmdData.rowsActive=0;
+              for (int i=5;i<11;i++){
+                rowStates.bytes[0]=packet.data()[i];  
+                cmdData.rowsActive+=rowStates.rowStatsStruct.row1;
+                cmdData.rowsActive+=rowStates.rowStatsStruct.row2;
+                cmdData.rowsActive+=rowStates.rowStatsStruct.row3;
+                cmdData.rowsActive+=rowStates.rowStatsStruct.row4;
+                cmdData.rowsActive+=rowStates.rowStatsStruct.row5;
+                cmdData.rowsActive+=rowStates.rowStatsStruct.row6;
+                cmdData.rowsActive+=rowStates.rowStatsStruct.row7;
+                cmdData.rowsActive+=rowStates.rowStatsStruct.row8; 
+              }
+              break;
 
             case 101:
 
@@ -245,7 +314,10 @@ WifiMethods wifiMethods = WifiMethods();
 
 void debugPrint(){
   if (esp_timer_get_time()-debugTimer>10000){
-    Serial.println("speed "+String(cmdData.avgSpeed));
+    Serial.print("speed "+String(cmdData.avgSpeed));
+    Serial.print(" ");
+    Serial.print(" Rows Active: ");
+    Serial.println(cmdData.rowsActive);
     debugTimer=esp_timer_get_time();
   }
   
@@ -259,6 +331,7 @@ void setup() {
   wifiMethods.init();
   udpMethods.init();
   pwmDriver.init();
+  voltMon.init();
   interruptSetup();
   // pwmDriver.init();
   
@@ -266,6 +339,7 @@ void setup() {
 }
 
 void loop() {
+  voltMon.getVoltages();
   debugPrint();
   // udpMethods.udpCheck();
   delay(150);
