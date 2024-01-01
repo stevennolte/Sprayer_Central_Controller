@@ -45,7 +45,7 @@ const uint8_t SECTION_5_PIN = 3;
 
 
 
-Adafruit_ADS1015 ads; 
+Adafruit_ADS1115 ads;
 AsyncUDP udp;
 IPAddress local_IP(192, 168, 0, 123);
 IPAddress gateway(192, 168, 0, 1);
@@ -154,26 +154,35 @@ class VoltageMonitor{
     }
 
     void init(){
-      byte error;
-      Wire.beginTransmission(0x48);
-      error = Wire.endTransmission();
-      if (error == 0){
-        Adafruit_ADS1015 ads;    //default address 0x48
+      // byte error;
+      // for(int i = 1; i < 127; i++ )
+      // {
+      // Wire.beginTransmission(i);
+      // error = Wire.endTransmission();
+      // if (error == 0){
+      //   Serial.println(i);
+            //default address 0x48
+        
         if (!ads.begin()) {
-          Serial.println("Failed to initialize ADS.");
+          // Serial.println("Failed to initialize ADS.");
           programStates.adsConnected = false;
         }
         programStates.adsConnected = true;
-      } else {
-        programStates.adsConnected = false;
-        Serial.println(error);
-        Serial.println("ads not connected");
-      }
+        Serial.println("ads connected");
+
+      
+      
     }
 
     void getVoltages(){
       if (programStates.adsConnected == true){
-        sensorData.railPressure = ads.readADC_SingleEnded(0);
+        // sensorData.railPressure = ads.readADC_SingleEnded(0);
+        int16_t adc0;
+        adc0 = ads.readADC_SingleEnded(0);
+        Serial.println(adc0);
+        // int16_t results = ads.getLastConversionResults();
+
+  // Serial.print("Differential: "); Serial.print(results); Serial.print("("); Serial.print(ads.computeVolts(results)); Serial.println("mV)");
       }
     }
 };
@@ -330,7 +339,7 @@ void setup() {
   statusLed.init();
   wifiMethods.init();
   udpMethods.init();
-  pwmDriver.init();
+  // pwmDriver.init();
   voltMon.init();
   interruptSetup();
   // pwmDriver.init();
@@ -342,6 +351,6 @@ void loop() {
   voltMon.getVoltages();
   debugPrint();
   // udpMethods.udpCheck();
-  delay(150);
+  delay(1000);
 }
 
