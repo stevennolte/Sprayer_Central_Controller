@@ -33,6 +33,8 @@ const uint8_t SECTION_2_PIN = 12;
 const uint8_t SECTION_3_PIN = 5;
 const uint8_t SECTION_4_PIN = 4;
 const uint8_t SECTION_5_PIN = 3;
+const uint8_t PWM_BOARD_1 = 0x40;
+const uint8_t ADS1115_BOARD = 0x48;
 // const uint8_t EXTRA_FREQ_1 = 6;
 // const uint8_t EXTRA_FREQ_2 = 5;
 
@@ -326,7 +328,9 @@ void debugPrint(){
     Serial.print("speed "+String(cmdData.avgSpeed));
     Serial.print(" ");
     Serial.print(" Rows Active: ");
-    Serial.println(cmdData.rowsActive);
+    Serial.print(cmdData.rowsActive);
+    Serial.print(" UDPcheck ");
+    Serial.println(programStates.udpConnected);
     debugTimer=esp_timer_get_time();
   }
   
@@ -336,11 +340,35 @@ void debugPrint(){
 void setup() {
   Serial.begin(115000);
   // Wire.setClock(400000);
+
+  byte error, address;
+  byte addressList[]={};
+  Serial.println("Scanning...");
+  for(address = 17; address < 127; address++ ) {
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+    if (error == 0) {
+      Serial.print("I2C device found at address 0x");
+      addressList[sizeof(addressList)]=address;
+    }
+  }
+  for (int i=0; i<sizeof(addressList); i++){
+    if (addressList[i] == PWM_BOARD_1){
+      programStates.pwmDriverConnected = true;
+    } 
+    if (addressList[i] == ADS1115_BOARD){
+      programStates.adsConnected = true;
+    } 
+  }
   statusLed.init();
   wifiMethods.init();
   udpMethods.init();
-  // pwmDriver.init();
-  voltMon.init();
+  if (programStates.pwmDriverConnected){
+    pwmDriver.init();
+  }
+  if (programStates.adsConnected){
+    voltMon.init();
+  }
   interruptSetup();
   // pwmDriver.init();
   
@@ -348,9 +376,11 @@ void setup() {
 }
 
 void loop() {
-  voltMon.getVoltages();
+  if (programStates.adsConnected){
+    voltMon.getVoltages();
+  }
+  udpMethods.udpCheck();
   debugPrint();
-  // udpMethods.udpCheck();
   delay(1000);
 }
 
