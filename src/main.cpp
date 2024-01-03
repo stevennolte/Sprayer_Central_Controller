@@ -14,9 +14,14 @@
 #include <ezOutput.h>
 #include <TaskScheduler.h>
 #include <Adafruit_ADS1X15.h>
-#include <ArduinoOTA.h>
+// #include <ArduinoOTA.h>
 #include <SPI.h>
 // CONSTANTS ///////////////////////////////////////////////////
+#define adsGain GAIN_TWOTHIRDS
+#define I2C_Freq 100000
+#define SDA_0 19
+#define SCL_0 23
+
 const char* ssid     = "SSEI";
 const char* password = "Nd14il!la";
 // const char* ssid = "BSTRIEGEL";
@@ -35,6 +40,8 @@ const uint8_t SECTION_4_PIN = 4;
 const uint8_t SECTION_5_PIN = 3;
 const uint8_t PWM_BOARD_1 = 0x40;
 const uint8_t ADS1115_BOARD = 0x48;
+
+
 // const uint8_t EXTRA_FREQ_1 = 6;
 // const uint8_t EXTRA_FREQ_2 = 5;
 
@@ -46,7 +53,7 @@ const uint8_t ADS1115_BOARD = 0x48;
 // CLASSES /////////////////////////////////////////////////////
 
 
-
+TwoWire twoWire = TwoWire(0);
 Adafruit_ADS1115 ads;
 AsyncUDP udp;
 IPAddress local_IP(192, 168, 0, 123);
@@ -102,13 +109,27 @@ struct programStates_t{
 
 
 struct cmdData_t{
+  uint8_t productEnable;
   uint16_t avgSpeed;
   uint16_t targetFlowrate;
   uint16_t targetRate;
   uint8_t rowsActive;
+  uint8_t hydFlowTarget;
+  uint8_t lhOuterWingRotate;
+  uint8_t lhWingRotate;
+  uint8_t lhWingLift;
+  uint8_t centerLift;
+  uint8_t rhWingLift;
+  uint8_t rhWingRotate;
+  uint8_t rhOuterWingRotate;
 } cmdData;
 
-
+struct reportData_t{
+  uint16_t voltage1;
+  uint16_t voltage2;
+  uint16_t voltage3;
+  uint16_t voltage4;
+} reportData;
 
 void IRAM_ATTR pulseCountMain(){
   
@@ -152,40 +173,40 @@ void interruptSetup(){
 class VoltageMonitor{
   public:
     VoltageMonitor(){
-
+    
     }
-
+    float voltMult = 0;
     void init(){
-      // byte error;
-      // for(int i = 1; i < 127; i++ )
-      // {
-      // Wire.beginTransmission(i);
-      // error = Wire.endTransmission();
-      // if (error == 0){
-      //   Serial.println(i);
-            //default address 0x48
-        
-        if (!ads.begin()) {
-          // Serial.println("Failed to initialize ADS.");
+        ads.setGain(adsGain);
+        if (!ads.begin(ADS1X15_ADDRESS, &twoWire)) {
           programStates.adsConnected = false;
         }
-        programStates.adsConnected = true;
-        Serial.println("ads connected");
-
-      
-      
+        switch(adsGain){
+          case GAIN_TWOTHIRDS:
+            voltMult = 1.875;
+            break;
+          case GAIN_ONE:
+            voltMult = 1.25;
+            break;
+          case GAIN_TWO:
+            voltMult = 0.625;
+            break;
+          case GAIN_FOUR:
+            voltMult = .3125;
+            break;
+        }
     }
 
     void getVoltages(){
       if (programStates.adsConnected == true){
-        // sensorData.railPressure = ads.readADC_SingleEnded(0);
-        int16_t adc0;
-        adc0 = ads.readADC_SingleEnded(0);
-        Serial.println(adc0);
-        // int16_t results = ads.getLastConversionResults();
-
-  // Serial.print("Differential: "); Serial.print(results); Serial.print("("); Serial.print(ads.computeVolts(results)); Serial.println("mV)");
+        
+        reportData.voltage3=ads.readADC_SingleEnded(2)*voltMult;
+        reportData.voltage4=ads.readADC_SingleEnded(3)*voltMult;
       }
+    }
+
+    void getCurrent(){
+       reportData.voltage1 = ads.readADC_Differential_0_1()*voltMult;
     }
 };
 VoltageMonitor voltMon = VoltageMonitor();
@@ -196,8 +217,8 @@ class PWMDriver{
     }
     void init(){
       byte error;
-      Wire.beginTransmission(0x40);
-      error = Wire.endTransmission();
+      twoWire.beginTransmission(0x40);
+      error = twoWire.endTransmission();
       if (error == 0){
         Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();   //default address 0x40
         pwm.begin();
@@ -234,6 +255,14 @@ class StatusLed{
       ledcWrite(WIFI_LED_CHAN, 255);
     }
 
+    void wifiFault(){
+      ledcChangeFrequency(WIFI_LED_CHAN, 10, 8);
+    }
+    
+    void statusFault(){
+      ledcChangeFrequency(STATUS_LED_CHAN, 10, 8);
+    }
+
     void udpGood(){
       ledcWrite(UDP_LED_CHAN, 255);
     }
@@ -258,9 +287,6 @@ class UDPMethods{
           switch(packet.data()[3]){
             case 254:
               cmdData.avgSpeed = (uint16_t)(packet.data()[6])*256+(uint16_t)(packet.data()[5]);
-              // Serial.println(cmdData.avgSpeed);
-              // debugMsgs[(int)(sizeof(debugMsgs))].debugName="avgSpeed";
-              // debugMsgs[1].debugValue=cmdData.avgSpeed;
               break;
             case 229:
               cmdData.rowsActive=0;
@@ -277,9 +303,20 @@ class UDPMethods{
               }
               break;
 
-            case 101:
-
+            case 151:
+              cmdData.productEnable = packet.data()[5];
+              cmdData.targetFlowrate = (uint16_t)(packet.data()[7])*256+(uint16_t)(packet.data()[6]);
+              cmdData.targetRate = (uint16_t)(packet.data()[9])*256+(uint16_t)(packet.data()[8]);
               break;
+            case 150:
+              cmdData.hydFlowTarget = packet.data()[5];
+              cmdData.lhOuterWingRotate = packet.data()[6];
+              cmdData.lhWingRotate = packet.data()[7];
+              cmdData.lhWingLift = packet.data()[8];
+              cmdData.centerLift = packet.data()[9];
+              cmdData.rhWingLift = packet.data()[10];
+              cmdData.rhWingRotate = packet.data()[11];
+              cmdData.rhOuterWingRotate = packet.data()[12];
           }
         }
       });
@@ -308,29 +345,65 @@ class WifiMethods{
       }
       WiFi.mode(WIFI_AP);
       WiFi.begin(ssid, password);
-      while(WiFi.status() != WL_CONNECTED){ 
+      int wifiStartTime = esp_timer_get_time();
+      while(WiFi.status() != WL_CONNECTED & esp_timer_get_time()-wifiStartTime < 1000000){ 
         delay(10);
       }
       Serial.println(WiFi.localIP());
       if (WiFi.status() == WL_CONNECTED){
         statusLed.wifiGood();
+      } else {
+        Serial.print("Can't connect to Wifi");
+        statusLed.wifiFault();
+        statusLed.statusFault();
       }
       delay(1000);
+      
     }
 };
 WifiMethods wifiMethods = WifiMethods();
 
+void scanI2C(){
+  uint8_t error = 0;
+  Serial.println("Scanning...");
+  for(uint8_t address = 17; address < 127; address++ ) {
+    twoWire.beginTransmission(address);
+    error = twoWire.endTransmission();
+    if (error == 0) {
+      
+      switch(address){
+        case 0x48:
+          programStates.adsConnected=true;
+          break;
+        case 0x40:
+          programStates.pwmDriverConnected=true;
+    }
+
+    }
+  
+  
+  }
+}
 
 // TIMERS //////////////////////////////////////////////////////
 
 void debugPrint(){
   if (esp_timer_get_time()-debugTimer>10000){
-    Serial.print("speed "+String(cmdData.avgSpeed));
+    Serial.print("CPU ");
+    Serial.print(getCpuFrequencyMhz()); // In MHz)
+    Serial.print(" Xtal ");
+    Serial.print(getXtalFrequencyMhz()); // In MHz)
+    
+    Serial.print(" speed "+String(cmdData.avgSpeed));
     Serial.print(" ");
     Serial.print(" Rows Active: ");
     Serial.print(cmdData.rowsActive);
     Serial.print(" UDPcheck ");
-    Serial.println(programStates.udpConnected);
+    Serial.print(programStates.udpConnected);
+    Serial.print(" ADS State ");
+    Serial.print(programStates.adsConnected);
+    Serial.print(" Voltage Reading ");
+    Serial.println(reportData.voltage1);
     debugTimer=esp_timer_get_time();
   }
 }
@@ -338,64 +411,57 @@ void debugPrint(){
 
 void setup() {
   Serial.begin(115000);
-  Wire.setPins(19,23);
-  Wire.begin();
-  ArduinoOTA
-    .onStart([]() {
-      String type;
-      if (ArduinoOTA.getCommand() == U_FLASH)
-        type = "sketch";
-      else // U_SPIFFS
-        type = "filesystem";
+  twoWire.begin(SDA_0, SCL_0, 400000);
+  // Wire.begin(SDA_0, SCL_0, I2C_Freq);
+  Serial.print("Wire clock ");
+  Serial.println(twoWire.getClock());
+  scanI2C();
+  // ArduinoOTA
+  //   .onStart([]() {
+  //     String type;
+  //     if (ArduinoOTA.getCommand() == U_FLASH)
+  //       type = "sketch";
+  //     else // U_SPIFFS
+  //       type = "filesystem";
 
-      // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
-      Serial.println("Start updating " + type);
-    })
-    .onEnd([]() {
-      Serial.println("\nEnd");
-    })
-    .onProgress([](unsigned int progress, unsigned int total) {
-      Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-    })
-    .onError([](ota_error_t error) {
-      Serial.printf("Error[%u]: ", error);
-      if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-      else if (error == OTA_END_ERROR) Serial.println("End Failed");
-    });
+  //     // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+  //     Serial.println("Start updating " + type);
+  //   })
+  //   .onEnd([]() {
+  //     Serial.println("\nEnd");
+  //   })
+  //   .onProgress([](unsigned int progress, unsigned int total) {
+  //     Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  //   })
+  //   .onError([](ota_error_t error) {
+  //     Serial.printf("Error[%u]: ", error);
+  //     if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+  //     else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+  //     else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+  //     else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+  //     else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  //   });
 
-  ArduinoOTA.begin();
+  // ArduinoOTA.begin();
   
   byte error, address;
   byte addressList[]={};
   
   
-  Serial.println("Scanning...");
-  for(address = 17; address < 127; address++ ) {
-    Wire.beginTransmission(address);
-    error = Wire.endTransmission();
-    if (error == 0) {
-      Serial.print("I2C device found at address 0x");
-      Serial.print(address, HEX);
-      addressList[sizeof(addressList)]=address;
-    }
-  }
-  for (int i=0; i<sizeof(addressList); i++){
-    if (addressList[i] == PWM_BOARD_1){
-      programStates.pwmDriverConnected = true;
-    } 
-    if (addressList[i] == ADS1115_BOARD){
-      programStates.adsConnected = true;
-    } 
-  }
+  
+  
+  
   statusLed.init();
+  
   wifiMethods.init();
+  
   udpMethods.init();
+
   if (programStates.pwmDriverConnected){
     pwmDriver.init();
   }
+  Serial.print("ads state ");
+  Serial.println(programStates.adsConnected);
   if (programStates.adsConnected){
     voltMon.init();
   }
@@ -406,9 +472,9 @@ void setup() {
 }
 
 void loop() {
-  ArduinoOTA.handle();
+  // ArduinoOTA.handle();
   if (programStates.adsConnected){
-    voltMon.getVoltages();
+    voltMon.getCurrent();
   }
   udpMethods.udpCheck();
   debugPrint();
