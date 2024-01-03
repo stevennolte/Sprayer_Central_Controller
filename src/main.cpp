@@ -14,7 +14,7 @@
 #include <ezOutput.h>
 #include <TaskScheduler.h>
 #include <Adafruit_ADS1X15.h>
-
+#include <ArduinoOTA.h>
 #include <SPI.h>
 // CONSTANTS ///////////////////////////////////////////////////
 const char* ssid     = "SSEI";
@@ -333,22 +333,52 @@ void debugPrint(){
     Serial.println(programStates.udpConnected);
     debugTimer=esp_timer_get_time();
   }
-  
 }
 
 
 void setup() {
   Serial.begin(115000);
-  // Wire.setClock(400000);
+  Wire.setPins(19,23);
+  Wire.begin();
+  ArduinoOTA
+    .onStart([]() {
+      String type;
+      if (ArduinoOTA.getCommand() == U_FLASH)
+        type = "sketch";
+      else // U_SPIFFS
+        type = "filesystem";
 
+      // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+      Serial.println("Start updating " + type);
+    })
+    .onEnd([]() {
+      Serial.println("\nEnd");
+    })
+    .onProgress([](unsigned int progress, unsigned int total) {
+      Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    })
+    .onError([](ota_error_t error) {
+      Serial.printf("Error[%u]: ", error);
+      if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+      else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    });
+
+  ArduinoOTA.begin();
+  
   byte error, address;
   byte addressList[]={};
+  
+  
   Serial.println("Scanning...");
   for(address = 17; address < 127; address++ ) {
     Wire.beginTransmission(address);
     error = Wire.endTransmission();
     if (error == 0) {
       Serial.print("I2C device found at address 0x");
+      Serial.print(address, HEX);
       addressList[sizeof(addressList)]=address;
     }
   }
@@ -376,6 +406,7 @@ void setup() {
 }
 
 void loop() {
+  ArduinoOTA.handle();
   if (programStates.adsConnected){
     voltMon.getVoltages();
   }
