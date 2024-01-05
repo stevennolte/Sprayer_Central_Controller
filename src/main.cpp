@@ -11,33 +11,47 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <Adafruit_PWMServoDriver.h>
-#include <ezOutput.h>
-#include <TaskScheduler.h>
+
+
 #include <Adafruit_ADS1X15.h>
-// #include <ArduinoOTA.h>
+#include <ArduinoOTA.h>
 #include <SPI.h>
+#include "driver/Ledc.h"
+#include <UMS3.h>
+
+UMS3 ums3;
 // CONSTANTS ///////////////////////////////////////////////////
 #define adsGain GAIN_TWOTHIRDS
 #define I2C_Freq 100000
-#define SDA_0 19
-#define SCL_0 23
+#define SDA_0 8
+#define SCL_0 9
+#define LEDC_MODE               LEDC_LOW_SPEED_MODE
+#define LEDC_DUTY_RES           LEDC_TIMER_13_BIT // Set duty resolution to 13 bits
+#define LEDC_TIMER              LEDC_TIMER_0
+#define LEDC_CHANNEL1            LEDC_CHANNEL_0
+#define LEDC_CHANNEL2            LEDC_CHANNEL_1
+#define LEDC_CHANNEL3            LEDC_CHANNEL_2
+#define LEDC_CHANNEL4            LEDC_CHANNEL_3
 
-const char* ssid     = "SSEI";
-const char* password = "Nd14il!la";
+
+// const char* ssid     = "SSEI";
+// const char* password = "Nd14il!la";
 // const char* ssid = "BSTRIEGEL";
 // const char* password = "6sUDCRp5L4ps";
+const char* ssid = "FERT";
+const char* password = "Fert504!";
 const uint8_t STATUS_LED = 2;
 const uint8_t STATUS_LED_CHAN = 0;
 const uint8_t WIFI_LED = 14;
 const uint8_t WIFI_LED_CHAN = 2;
 const uint8_t UDP_LED = 15;
 const uint8_t UDP_LED_CHAN = 4;
-const uint8_t MAIN_FLOW_PIN = 14;
-const uint8_t SECTION_1_PIN = 13;
-const uint8_t SECTION_2_PIN = 12;
-const uint8_t SECTION_3_PIN = 5;
+// const uint8_t MAIN_FLOW_PIN = 14;
+const uint8_t SECTION_1_PIN = 1;
+const uint8_t SECTION_2_PIN = 2;
+const uint8_t SECTION_3_PIN = 3;
 const uint8_t SECTION_4_PIN = 4;
-const uint8_t SECTION_5_PIN = 3;
+// const uint8_t SECTION_5_PIN = 3;
 const uint8_t PWM_BOARD_1 = 0x40;
 const uint8_t ADS1115_BOARD = 0x48;
 
@@ -61,7 +75,7 @@ IPAddress gateway(192, 168, 0, 1);
 IPAddress subnet(255, 255, 255, 0);
 
 // DEBUG //////////////////////////////////////////////////
-Scheduler runner;
+// Scheduler runner;
 
 struct debugMsgs_t{
   String debugName;
@@ -98,6 +112,14 @@ sensorData_t sensorData;
 
 
 // INTERNAL STRUCTS ////////////////////////////////////////////
+struct valveDataStruct {
+  uint8_t ValveNum;
+  uint16_t dutyCycleCMD;
+  uint16_t frequencyCMD;
+  uint16_t frequencyRPT;
+  uint16_t current_ma;
+};
+
 struct programStates_t{
   bool pwmDriverConnected;
   bool adsConnected;
@@ -122,6 +144,7 @@ struct cmdData_t{
   uint8_t rhWingLift;
   uint8_t rhWingRotate;
   uint8_t rhOuterWingRotate;
+  uint8_t rowSpacing;
 } cmdData;
 
 struct reportData_t{
@@ -156,18 +179,18 @@ void IRAM_ATTR pulseCountSec5(){
   return;
 }
 void interruptSetup(){
-  pinMode(MAIN_FLOW_PIN, INPUT_PULLUP);
-  pinMode(SECTION_1_PIN, INPUT_PULLUP);
-  pinMode(SECTION_2_PIN, INPUT_PULLUP);
-  pinMode(SECTION_3_PIN, INPUT_PULLUP);
-  pinMode(SECTION_4_PIN, INPUT_PULLUP);
-  pinMode(SECTION_5_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(MAIN_FLOW_PIN), pulseCountMain, RISING);
+  // pinMode(MAIN_FLOW_PIN, INPUT_PULLUP);
+  pinMode(SECTION_1_PIN, INPUT);
+  pinMode(SECTION_2_PIN, INPUT);
+  pinMode(SECTION_3_PIN, INPUT);
+  pinMode(SECTION_4_PIN, INPUT);
+  // pinMode(SECTION_5_PIN, INPUT_PULLUP);
+  // attachInterrupt(digitalPinToInterrupt(MAIN_FLOW_PIN), pulseCountMain, RISING);
   attachInterrupt(digitalPinToInterrupt(SECTION_1_PIN), pulseCountSec1, RISING);
   attachInterrupt(digitalPinToInterrupt(SECTION_2_PIN), pulseCountSec2, RISING);
   attachInterrupt(digitalPinToInterrupt(SECTION_3_PIN), pulseCountSec3, RISING);
   attachInterrupt(digitalPinToInterrupt(SECTION_4_PIN), pulseCountSec4, RISING);
-  attachInterrupt(digitalPinToInterrupt(SECTION_5_PIN), pulseCountSec5, RISING);
+  // attachInterrupt(digitalPinToInterrupt(SECTION_5_PIN), pulseCountSec5, RISING);
 }
 
 class VoltageMonitor{
@@ -210,6 +233,55 @@ class VoltageMonitor{
     }
 };
 VoltageMonitor voltMon = VoltageMonitor();
+
+class Valve{
+  private:
+    byte pin;
+      byte duty = 0;
+      byte freq = 50;
+      ledc_channel_t channel;
+      byte resolution = 8;
+  public:
+    valveDataStruct valveData;
+    Valve(byte pin, ledc_channel_t channel){
+      this ->pin = pin;
+      this ->channel = channel;
+    }
+
+    void init()
+      {
+    // Prepare and then apply the LEDC PWM timer configuration
+          ledc_timer_config_t ledc_timer = {
+              .speed_mode       = LEDC_MODE,
+              .duty_resolution  = LEDC_DUTY_RES,
+              .timer_num        = LEDC_TIMER,
+              .freq_hz          = freq,  // Set output frequency at 4 kHz
+              .clk_cfg          = LEDC_AUTO_CLK
+          };
+          ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+
+          ledc_channel_config_t ledc_channel = {
+              .gpio_num       = pin,
+              .speed_mode     = LEDC_MODE,
+              .channel        = channel,
+              .intr_type      = LEDC_INTR_DISABLE,
+              .timer_sel      = LEDC_TIMER,
+              
+              
+              .duty           = 0, // Set duty to 0%
+              .hpoint         = 0
+          };
+          ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+ 
+      }
+
+      void updateValve(){
+        // ledc_set_freq(LEDC_MODE, LEDC_TIMER, valveData.frequencyCMD);
+        ledc_set_duty(LEDC_MODE, channel, valveData.dutyCycleCMD);
+        ledc_update_duty(LEDC_MODE, channel);
+      }
+};
+Valve valves[4] = {Valve(12,LEDC_CHANNEL1), Valve(13,LEDC_CHANNEL2),Valve(14,LEDC_CHANNEL3),Valve(15,LEDC_CHANNEL4)};
 
 class PWMDriver{
   public:
@@ -289,6 +361,7 @@ class UDPMethods{
               cmdData.avgSpeed = (uint16_t)(packet.data()[6])*256+(uint16_t)(packet.data()[5]);
               break;
             case 229:
+              
               cmdData.rowsActive=0;
               for (int i=5;i<11;i++){
                 rowStates.bytes[0]=packet.data()[i];  
@@ -304,9 +377,16 @@ class UDPMethods{
               break;
 
             case 151:
+              
               cmdData.productEnable = packet.data()[5];
               cmdData.targetFlowrate = (uint16_t)(packet.data()[7])*256+(uint16_t)(packet.data()[6]);
               cmdData.targetRate = (uint16_t)(packet.data()[9])*256+(uint16_t)(packet.data()[8]);
+              valves[0].valveData.dutyCycleCMD = packet.data()[13]*256+packet.data()[12];
+              valves[0].updateValve();
+              valves[1].valveData.dutyCycleCMD = packet.data()[17]*256+packet.data()[16];
+              valves[1].updateValve();
+              valves[2].valveData.dutyCycleCMD = packet.data()[21]*256+packet.data()[20];
+              valves[2].updateValve();
               break;
             case 150:
               cmdData.hydFlowTarget = packet.data()[5];
@@ -323,7 +403,7 @@ class UDPMethods{
     }
 
     void udpCheck(){
-      if(esp_timer_get_time()-programStates.udpTimer < 1000){
+      if(esp_timer_get_time()-programStates.udpTimer < 100000){
         programStates.udpConnected=true;
       } else {
         programStates.udpConnected=false;
@@ -363,6 +443,18 @@ class WifiMethods{
 };
 WifiMethods wifiMethods = WifiMethods();
 
+class ProductControl{
+  public:
+    ProductControl(){
+      cmdData.rowSpacing = 20;
+    }
+
+    void calcFlowRate(){
+      uint16_t toolWidth = cmdData.rowsActive*cmdData.rowSpacing;
+    }
+
+};
+
 void scanI2C(){
   uint8_t error = 0;
   Serial.println("Scanning...");
@@ -389,11 +481,8 @@ void scanI2C(){
 
 void debugPrint(){
   if (esp_timer_get_time()-debugTimer>10000){
-    Serial.print("CPU ");
-    Serial.print(getCpuFrequencyMhz()); // In MHz)
-    Serial.print(" Xtal ");
-    Serial.print(getXtalFrequencyMhz()); // In MHz)
-    
+    Serial.print("Target Rate ");
+    Serial.print(cmdData.targetRate);
     Serial.print(" speed "+String(cmdData.avgSpeed));
     Serial.print(" ");
     Serial.print(" Rows Active: ");
@@ -403,58 +492,72 @@ void debugPrint(){
     Serial.print(" ADS State ");
     Serial.print(programStates.adsConnected);
     Serial.print(" Voltage Reading ");
-    Serial.println(reportData.voltage1);
+    Serial.print(reportData.voltage1);
+    Serial.print(" row4 duty ");
+    Serial.print(valves[3].valveData.dutyCycleCMD);
+    Serial.print(" row4 freq ");
+    Serial.print(valves[3].valveData.frequencyCMD);
+    Serial.println();
     debugTimer=esp_timer_get_time();
   }
 }
 
 
 void setup() {
+  ums3.begin();
+  ums3.setPixelBrightness(255);
+  ums3.setPixelPower(true);
+  ums3.setPixelColor(UMS3::color(245, 78, 66));
+  
+  
   Serial.begin(115000);
-  twoWire.begin(SDA_0, SCL_0, 400000);
+  Serial.println("Initializing");
+  twoWire.begin(SDA_0, SCL_0);
   // Wire.begin(SDA_0, SCL_0, I2C_Freq);
   Serial.print("Wire clock ");
   Serial.println(twoWire.getClock());
   scanI2C();
-  // ArduinoOTA
-  //   .onStart([]() {
-  //     String type;
-  //     if (ArduinoOTA.getCommand() == U_FLASH)
-  //       type = "sketch";
-  //     else // U_SPIFFS
-  //       type = "filesystem";
-
-  //     // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
-  //     Serial.println("Start updating " + type);
-  //   })
-  //   .onEnd([]() {
-  //     Serial.println("\nEnd");
-  //   })
-  //   .onProgress([](unsigned int progress, unsigned int total) {
-  //     Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-  //   })
-  //   .onError([](ota_error_t error) {
-  //     Serial.printf("Error[%u]: ", error);
-  //     if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-  //     else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-  //     else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-  //     else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-  //     else if (error == OTA_END_ERROR) Serial.println("End Failed");
-  //   });
-
-  // ArduinoOTA.begin();
-  
-  byte error, address;
-  byte addressList[]={};
-  
-  
-  
-  
-  
-  statusLed.init();
-  
   wifiMethods.init();
+  ArduinoOTA
+    .onStart([]() {
+      String type;
+      if (ArduinoOTA.getCommand() == U_FLASH)
+        type = "sketch";
+      else // U_SPIFFS
+        type = "filesystem";
+
+      // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+      Serial.println("Start updating " + type);
+    })
+    .onEnd([]() {
+      Serial.println("\nEnd");
+    })
+    .onProgress([](unsigned int progress, unsigned int total) {
+      Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    })
+    .onError([](ota_error_t error) {
+      Serial.printf("Error[%u]: ", error);
+      if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+      else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    });
+
+  ArduinoOTA.begin();
   
+  // byte error, address;
+  // byte addressList[]={};
+  
+  
+  
+  
+  
+  // statusLed.init();
+  Serial.println("OTA enabled");
+
+  
+  Serial.println("Wifi enabled");
   udpMethods.init();
 
   if (programStates.pwmDriverConnected){
@@ -467,12 +570,15 @@ void setup() {
   }
   interruptSetup();
   // pwmDriver.init();
-  
+  for (int i=0; i<4; i++){
+    valves[i].init();
+  }
+  ums3.setPixelColor(UMS3::color(72,245,66));
     
 }
 
 void loop() {
-  // ArduinoOTA.handle();
+  ArduinoOTA.handle();
   if (programStates.adsConnected){
     voltMon.getCurrent();
   }
