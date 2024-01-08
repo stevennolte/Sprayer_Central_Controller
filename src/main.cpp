@@ -22,9 +22,10 @@
 UMS3 ums3;
 // CONSTANTS ///////////////////////////////////////////////////
 #define adsGain GAIN_TWOTHIRDS
-#define I2C_Freq 100000
+#define I2C_Freq 400000
 #define SDA_0 8
 #define SCL_0 9
+// #define RGB_BRIGHTNESS 100
 #define LEDC_MODE               LEDC_LOW_SPEED_MODE
 #define LEDC_DUTY_RES           LEDC_TIMER_13_BIT // Set duty resolution to 13 bits
 #define LEDC_TIMER              LEDC_TIMER_0
@@ -33,14 +34,16 @@ UMS3 ums3;
 #define LEDC_CHANNEL3            LEDC_CHANNEL_2
 #define LEDC_CHANNEL4            LEDC_CHANNEL_3
 
-// const char* ssids[] = {"SSEI","BSTRIEGEL","FERT"};
-// const char* passwords[] = {"Nd14il!la","6sUDCRp5L4ps","Fert504!"};
+const char* ssids[] = {"SSEI","BSTRIEGEL","FERT"};
+const char* passwords[] = {"Nd14il!la","6sUDCRp5L4ps","Fert504!"};
 // const char* ssid     = "SSEI";
 // const char* password = "Nd14il!la";
 // const char* ssid = "BSTRIEGEL";
 // const char* password = "6sUDCRp5L4ps";
-const char* ssid = "FERT";
-const char* password = "Fert504!";
+// const char* ssid = "FERT";
+// const char* password = "Fert504!";
+const char* ssid = "";
+const char* password = "";
 const uint8_t STATUS_LED = 2;
 const uint8_t STATUS_LED_CHAN = 0;
 const uint8_t WIFI_LED = 14;
@@ -113,6 +116,8 @@ sensorData_t sensorData;
 
 
 // INTERNAL STRUCTS ////////////////////////////////////////////
+uint16_t sectionCmds[48];
+
 struct valveDataStruct {
   uint8_t ValveNum;
   uint16_t dutyCycleCMD;
@@ -138,6 +143,7 @@ struct cmdData_t{
   uint16_t targetFlowrate;
   uint16_t targetRate;
   uint8_t rowsActive;
+  uint8_t numOfsections;
   uint8_t hydFlowTarget;
   uint8_t lhOuterWingRotate;
   uint8_t lhWingRotate;
@@ -224,7 +230,7 @@ class VoltageMonitor{
 
     void getVoltages(){
       if (programStates.adsConnected == true){
-        
+        reportData.voltage1=ads.readADC_SingleEnded(0)*voltMult;
         reportData.voltage3=ads.readADC_SingleEnded(2)*voltMult;
         reportData.voltage4=ads.readADC_SingleEnded(3)*voltMult;
       }
@@ -285,64 +291,88 @@ class Valve{
 };
 Valve valves[4] = {Valve(12,LEDC_CHANNEL1), Valve(13,LEDC_CHANNEL2),Valve(14,LEDC_CHANNEL3),Valve(15,LEDC_CHANNEL4)};
 
+
+
 class PWMDriver{
   public:
     PWMDriver(){
     }
     void init(){
-      byte error;
-      twoWire.beginTransmission(0x40);
-      error = twoWire.endTransmission();
-      if (error == 0){
-        Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();   //default address 0x40
+      
+      
+           //default address 0x40
+        Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40, twoWire);
         pwm.begin();
         pwm.setOscillatorFrequency(27000000);
         pwm.setPWMFreq(150);
-        programStates.pwmDriverConnected = true;
-      } else {
-        programStates.pwmDriverConnected = false;
-        Serial.println(error);
-        Serial.println("pwm driver not connected");
-      }
+        pwm.setPWM(1, 4096, 0);
+
+        // pwm.setPWMFreq(150);
+        // programStates.pwmDriverConnected = true;
+      
+
     } 
 };
 PWMDriver pwmDriver = PWMDriver();
 
 class StatusLed{
+  private:
+    int colorCnt = 0;
   public:
     StatusLed(){
 
     }
+
+    struct ledSettings_t{
+      uint8_t brightness = 60;
+      uint8_t redValue = 255;
+      uint8_t greenValue = 0;
+      uint8_t blueValue = 0;
+      uint16_t flashDuration;
+      bool flash = false;
+      bool power = true;
+      bool colorWheel = false;
+
+    } ledSettings;
+
     void init(){
-      ledcSetup(STATUS_LED_CHAN,4,8);
-      ledcSetup(WIFI_LED_CHAN,4,8);
-      ledcSetup(UDP_LED_CHAN,4,8);
-      ledcAttachPin(STATUS_LED, 0);
-      ledcAttachPin(WIFI_LED,2);
-      ledcAttachPin(UDP_LED,4);
-      ledcWrite(STATUS_LED_CHAN, 50);
-      ledcWrite(WIFI_LED_CHAN, 50);
-      ledcWrite(UDP_LED_CHAN, 50);
+      
+    }
+
+    void waiting(){
+      ums3.setPixelBrightness(ledSettings.brightness);
+      ums3.setPixelPower(ledSettings.power);
+      ums3.setPixelColor(ledSettings.redValue,ledSettings.greenValue,ledSettings.blueValue);
     }
 
     void wifiGood(){
-      ledcWrite(WIFI_LED_CHAN, 255);
+      ledSettings.redValue = 0;
+      ledSettings.blueValue = 0;
+      ledSettings.greenValue = 255;
+      
+      ums3.setPixelBrightness(ledSettings.brightness);
+      ums3.setPixelPower(ledSettings.power);
+      ums3.setPixelColor(ledSettings.redValue,ledSettings.greenValue,ledSettings.blueValue);
     }
 
     void wifiFault(){
-      ledcChangeFrequency(WIFI_LED_CHAN, 10, 8);
+      ledSettings.redValue = 255;
+      ledSettings.blueValue = 0;
+      ledSettings.greenValue = 0;
+      ums3.setPixelPower(ledSettings.power);
+      ums3.setPixelColor(ledSettings.redValue,ledSettings.greenValue,ledSettings.blueValue);
     }
     
     void statusFault(){
-      ledcChangeFrequency(STATUS_LED_CHAN, 10, 8);
+      
     }
 
     void udpGood(){
-      ledcWrite(UDP_LED_CHAN, 255);
+      
     }
 
     void statusGood(){
-      ledcWrite(STATUS_LED_CHAN, 255);
+      
     }
 };
 StatusLed statusLed = StatusLed();
@@ -378,17 +408,22 @@ class UDPMethods{
               }
               break;
 
+            case 154:
+              
+              for (int i=0; i<cmdData.numOfsections*2; i++){
+                sectionCmds[i]=packet.data()[i*2+5]*256+packet.data()[i*2+6];
+              }
+              
+              break;
+
             case 151:
               
               cmdData.productEnable = packet.data()[5];
-              cmdData.targetFlowrate = (uint16_t)(packet.data()[7])*256+(uint16_t)(packet.data()[6]);
-              cmdData.targetRate = (uint16_t)(packet.data()[9])*256+(uint16_t)(packet.data()[8]);
-              valves[0].valveData.dutyCycleCMD = packet.data()[13]*256+packet.data()[12];
-              valves[0].updateValve();
-              valves[1].valveData.dutyCycleCMD = packet.data()[17]*256+packet.data()[16];
-              valves[1].updateValve();
-              valves[2].valveData.dutyCycleCMD = packet.data()[21]*256+packet.data()[20];
-              valves[2].updateValve();
+              cmdData.numOfsections = packet.data()[6];
+              cmdData.rowSpacing = (uint16_t)(packet.data()[8])*256+(uint16_t)(packet.data()[7]);
+              cmdData.targetFlowrate = (uint16_t)(packet.data()[10])*256+(uint16_t)(packet.data()[9]);
+              cmdData.targetRate = (uint16_t)(packet.data()[12])*256+(uint16_t)(packet.data()[11]);
+              
               break;
             case 150:
               cmdData.hydFlowTarget = packet.data()[5];
@@ -425,15 +460,26 @@ class WifiMethods{
       int n = WiFi.scanNetworks();
       Serial.print(n);
       Serial.println(" networks found");
-      if (!WiFi.config(local_IP, gateway, subnet)) {
-        Serial.println("STA Failed to configure");
+      for (int i=0; i<n; i++){
+        for (int si=0; si<3;si++){
+          if (WiFi.SSID(i) == ssids[si]){
+            ssid = ssids[si];
+            password = passwords[si];
+          }
+        }
       }
+      if (!WiFi.config(local_IP, gateway, subnet)) {
+              Serial.println("STA Failed to configure");
+            }
       WiFi.mode(WIFI_AP);
       WiFi.begin(ssid, password);
       while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-        Serial.println("Connection Failed! Rebooting...");
-        delay(5000);
-        ESP.restart();
+        delay(1000);
+      }
+      if (WiFi.status() == WL_CONNECTED){
+        statusLed.wifiGood();
+      } else {
+        statusLed.wifiFault();
       }
       delay(1000);
       
@@ -462,19 +508,16 @@ void scanI2C(){
     twoWire.beginTransmission(address);
     error = twoWire.endTransmission();
     if (error == 0) {
-      
+      Serial.print(address);
+      Serial.print(" ");
       switch(address){
         case 0x48:
           programStates.adsConnected=true;
           break;
         case 0x40:
           programStates.pwmDriverConnected=true;
-    }
-
-    }
-  
-  
-  }
+  }}}
+  Serial.println();
 }
 
 // TIMERS //////////////////////////////////////////////////////
@@ -505,15 +548,13 @@ void debugPrint(){
 
 void setup() {
   ums3.begin();
-  ums3.setPixelBrightness(255);
-  ums3.setPixelPower(true);
-  ums3.setPixelColor(UMS3::color(245, 78, 66));
+  statusLed.waiting();
   
   
   Serial.begin(115000);
   Serial.println("Initializing");
   twoWire.begin(SDA_0, SCL_0);
-  // Wire.begin(SDA_0, SCL_0, I2C_Freq);
+  Wire.begin(SDA_0, SCL_0);
   Serial.print("Wire clock ");
   Serial.println(twoWire.getClock());
   scanI2C();
@@ -545,10 +586,11 @@ void setup() {
     });
 
   ArduinoOTA.begin();
-  
+  ArduinoOTA.handle();
   // byte error, address;
   // byte addressList[]={};
   
+
   
   
   
@@ -567,6 +609,7 @@ void setup() {
   Serial.println(programStates.adsConnected);
   if (programStates.adsConnected){
     voltMon.init();
+
   }
   interruptSetup();
   // pwmDriver.init();
@@ -579,9 +622,15 @@ void setup() {
 
 void loop() {
   ArduinoOTA.handle();
-  if (programStates.adsConnected){
-    voltMon.getCurrent();
+  for (int i=0; i<4; i++){
+    valves[i].valveData.dutyCycleCMD = sectionCmds[i]*10;
+    valves[i].updateValve();
   }
+
+  if (programStates.adsConnected){
+    voltMon.getVoltages();
+  }
+
   udpMethods.udpCheck();
   debugPrint();
   delay(1000);
