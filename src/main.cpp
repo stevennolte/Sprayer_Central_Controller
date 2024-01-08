@@ -33,14 +33,14 @@ UMS3 ums3;
 #define LEDC_CHANNEL3            LEDC_CHANNEL_2
 #define LEDC_CHANNEL4            LEDC_CHANNEL_3
 
-const char* ssids[] = {"SSEI","BSTRIEGEL","FERT"};
-const char* passwords[] = {"Nd14il!la","6sUDCRp5L4ps","Fert504!"};
+// const char* ssids[] = {"SSEI","BSTRIEGEL","FERT"};
+// const char* passwords[] = {"Nd14il!la","6sUDCRp5L4ps","Fert504!"};
 // const char* ssid     = "SSEI";
 // const char* password = "Nd14il!la";
 // const char* ssid = "BSTRIEGEL";
 // const char* password = "6sUDCRp5L4ps";
-// const char* ssid = "FERT";
-// const char* password = "Fert504!";
+const char* ssid = "FERT";
+const char* password = "Fert504!";
 const uint8_t STATUS_LED = 2;
 const uint8_t STATUS_LED_CHAN = 0;
 const uint8_t WIFI_LED = 14;
@@ -122,6 +122,7 @@ struct valveDataStruct {
 };
 
 struct programStates_t{
+  bool wifiConnected;
   bool pwmDriverConnected;
   bool adsConnected;
   bool udpConnected;
@@ -422,39 +423,22 @@ class WifiMethods{
     
     void init(){
       int n = WiFi.scanNetworks();
-
+      Serial.print(n);
+      Serial.println(" networks found");
       if (!WiFi.config(local_IP, gateway, subnet)) {
         Serial.println("STA Failed to configure");
       }
       WiFi.mode(WIFI_AP);
-      for (int i=0;i<n;i++){
-        for (int ii=0;ii<sizeof(ssids);ii++){
-          if (WiFi.SSID(i) == ssids[ii]){
-            WiFi.begin(ssids[ii], passwords[ii]);
-          }
-          if (WiFi.status() == WL_CONNECTED){
-            break;
-          }
-        }
-        if (WiFi.status() == WL_CONNECTED){
-            break;
-      }
-      
-      int wifiStartTime = esp_timer_get_time();
-      while(WiFi.status() != WL_CONNECTED & esp_timer_get_time()-wifiStartTime < 1000000){ 
-        delay(10);
-      }
-      Serial.println(WiFi.localIP());
-      if (WiFi.status() == WL_CONNECTED){
-        statusLed.wifiGood();
-      } else {
-        Serial.print("Can't connect to Wifi");
-        statusLed.wifiFault();
-        statusLed.statusFault();
+      WiFi.begin(ssid, password);
+      while (WiFi.waitForConnectResult() != WL_CONNECTED) {
+        Serial.println("Connection Failed! Rebooting...");
+        delay(5000);
+        ESP.restart();
       }
       delay(1000);
       
-    }
+      
+    
     }
 };
 WifiMethods wifiMethods = WifiMethods();
