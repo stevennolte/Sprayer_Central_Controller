@@ -18,8 +18,8 @@
 #include <SPI.h>
 #include "driver/Ledc.h"
 #include <UMS3.h>
+#include "driver/gpio.h"
 
-UMS3 ums3;
 // CONSTANTS ///////////////////////////////////////////////////
 #define adsGain GAIN_TWOTHIRDS
 #define I2C_Freq 400000
@@ -58,8 +58,7 @@ const uint8_t SECTION_4_PIN = 4;
 // const uint8_t SECTION_5_PIN = 3;
 const uint8_t PWM_BOARD_1 = 0x40;
 const uint8_t ADS1115_BOARD = 0x48;
-
-
+const uint8_t addressPins[] = {39,40,41,42};
 // const uint8_t EXTRA_FREQ_1 = 6;
 // const uint8_t EXTRA_FREQ_2 = 5;
 
@@ -70,26 +69,21 @@ const uint8_t ADS1115_BOARD = 0x48;
 
 // CLASSES /////////////////////////////////////////////////////
 
-
+hw_timer_t * timer = NULL; 
+UMS3 ums3;
 TwoWire twoWire = TwoWire(0);
 Adafruit_ADS1115 ads;
 AsyncUDP udp;
-IPAddress local_IP(192, 168, 0, 123);
+
 IPAddress gateway(192, 168, 0, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-// DEBUG //////////////////////////////////////////////////
-// Scheduler runner;
-
-struct debugMsgs_t{
-  String debugName;
-  float debugValue;
-} debugMsgs[1];
 
 
 // VARIABLES ///////////////////////////////////////////////////
-int debugTimer = 0;
+volatile int color = 0;
 int rows = 0;
+uint8_t address;
 // INCOMING UDP STRUCTS ////////////////////////////////////////
 
 struct __attribute__ ((packed)) rowStatesStruct_t{
@@ -116,7 +110,7 @@ sensorData_t sensorData;
 
 
 // INTERNAL STRUCTS ////////////////////////////////////////////
-uint16_t sectionCmds[48];
+// uint16_t sectionCmds[48];
 
 struct valveDataStruct {
   uint8_t ValveNum;
@@ -125,6 +119,8 @@ struct valveDataStruct {
   uint16_t frequencyRPT;
   uint16_t current_ma;
 };
+
+valveDataStruct sectionCmds[48];
 
 struct programStates_t{
   bool wifiConnected;
@@ -161,6 +157,15 @@ struct reportData_t{
   uint16_t voltage3;
   uint16_t voltage4;
 } reportData;
+
+void IRAM_ATTR rgbTimer() {      //Defining Inerrupt function with IRAM_ATTR for faster access
+  if (color > 255){
+    color = 0;
+  } else {
+  color++;
+  }
+  ums3.setPixelColor(UMS3::colorWheel(color));
+}
 
 void IRAM_ATTR pulseCountMain(){
   
@@ -320,7 +325,12 @@ class StatusLed{
     int colorCnt = 0;
   public:
     StatusLed(){
-
+      timer = timerBegin(0, 80, true);
+      timerAttachInterrupt(timer, rgbTimer, true);
+      timerAlarmWrite(timer, 50000, true);
+      timerAlarmEnable(timer);
+      ums3.setPixelBrightness(ledSettings.brightness);
+      ums3.setPixelPower(ledSettings.power); 
     }
 
     struct ledSettings_t{
@@ -340,12 +350,14 @@ class StatusLed{
     }
 
     void waiting(){
-      ums3.setPixelBrightness(ledSettings.brightness);
-      ums3.setPixelPower(ledSettings.power);
-      ums3.setPixelColor(ledSettings.redValue,ledSettings.greenValue,ledSettings.blueValue);
+      // ums3.setPixelColor(UMS3::colorWheel(color));
+      // ums3.setPixelBrightness(ledSettings.brightness);
+      // ums3.setPixelPower(ledSettings.power);
+      // ums3.setPixelColor(ledSettings.redValue,ledSettings.greenValue,ledSettings.blueValue);
     }
 
     void wifiGood(){
+      timerDetachInterrupt(timer);
       ledSettings.redValue = 0;
       ledSettings.blueValue = 0;
       ledSettings.greenValue = 255;
@@ -410,8 +422,9 @@ class UDPMethods{
 
             case 154:
               
-              for (int i=0; i<cmdData.numOfsections*2; i++){
-                sectionCmds[i]=packet.data()[i*2+5]*256+packet.data()[i*2+6];
+              for (int i=0; i<cmdData.numOfsections; i++){
+                sectionCmds[i].dutyCycleCMD = packet.data()[i*2+5]*256+packet.data()[i*2+6];
+                
               }
               
               break;
@@ -440,7 +453,7 @@ class UDPMethods{
     }
 
     void udpCheck(){
-      if(esp_timer_get_time()-programStates.udpTimer < 100000){
+      if(esp_timer_get_time()-programStates.udpTimer < 1000000){
         programStates.udpConnected=true;
       } else {
         programStates.udpConnected=false;
@@ -457,6 +470,7 @@ class WifiMethods{
     }
     
     void init(){
+      IPAddress local_IP(192, 168, 0, address);
       int n = WiFi.scanNetworks();
       Serial.print(n);
       Serial.println(" networks found");
@@ -520,43 +534,92 @@ void scanI2C(){
   Serial.println();
 }
 
+void getAddress(){
+  
+  uint8_t val=0;
+  // gpio_config_t gpioConfig;
+  // gpioConfig.mode = GPIO_MODE_INPUT;
+  // gpioConfig.pin_bit_mask = (1U<<42);
+  
+  // gpio_config(&gpioConfig);
+  
+  for (int i = 0; i < 4; i++){
+    pinMode(addressPins[i], INPUT);
+    delay(100);
+    if (digitalRead(addressPins[i]) == HIGH){
+      val+=pow(2,i);
+    }
+  }
+  address= 37 + val;
+}
 // TIMERS //////////////////////////////////////////////////////
 
-void debugPrint(){
-  if (esp_timer_get_time()-debugTimer>10000){
-    Serial.print("Target Rate ");
-    Serial.print(cmdData.targetRate);
-    Serial.print(" speed "+String(cmdData.avgSpeed));
-    Serial.print(" ");
-    Serial.print(" Rows Active: ");
-    Serial.print(cmdData.rowsActive);
-    Serial.print(" UDPcheck ");
-    Serial.print(programStates.udpConnected);
-    Serial.print(" ADS State ");
-    Serial.print(programStates.adsConnected);
-    Serial.print(" Voltage Reading ");
-    Serial.print(reportData.voltage1);
-    Serial.print(" row4 duty ");
-    Serial.print(valves[3].valveData.dutyCycleCMD);
-    Serial.print(" row4 freq ");
-    Serial.print(valves[3].valveData.frequencyCMD);
-    Serial.println();
-    debugTimer=esp_timer_get_time();
-  }
-}
+class DebugPrinter{
+  private:
+    int debugTimePrevious=0;
+    int debugTimeTrip=1000000;
+
+  public:
+    DebugPrinter(){
+
+    }
+    void print(){
+      if (esp_timer_get_time()-debugTimePrevious > debugTimeTrip){
+        topDebug();
+        rowDebug();
+        debugTimePrevious = esp_timer_get_time();
+      }
+    }
+    void topDebug(){
+      
+        Serial.print("Target Rate ");
+        Serial.print(cmdData.targetRate);
+        Serial.print(" speed "+String(cmdData.avgSpeed));
+        Serial.print(" ");
+        Serial.print(" Rows Active: ");
+        Serial.print(cmdData.rowsActive);
+        Serial.print(" UDPcheck ");
+        Serial.print(programStates.udpConnected);
+        Serial.print(" ADS State ");
+        Serial.print(programStates.adsConnected);
+        Serial.print(" Voltage Reading ");
+        Serial.print(reportData.voltage1);
+        Serial.print(" row4 duty ");
+        Serial.print(valves[3].valveData.dutyCycleCMD);
+        Serial.print(" row4 freq ");
+        Serial.print(valves[3].valveData.frequencyCMD);
+        Serial.println();
+        
+      
+    }
+
+    void rowDebug(){
+    
+      for (int x = 0; x < cmdData.numOfsections; x+=8){
+        for (int y = 0; y < 8; y++){
+        
+          Serial.print("Row ");
+          Serial.print(x+y);
+          Serial.print(" ");
+          Serial.print(sectionCmds[x+y].dutyCycleCMD);
+          Serial.print("\t");
+        }
+      Serial.println();
+      }
+    
+    }
+};
+DebugPrinter debugPrinter = DebugPrinter();
 
 
 void setup() {
   ums3.begin();
-  statusLed.waiting();
-  
-  
   Serial.begin(115000);
   Serial.println("Initializing");
-  twoWire.begin(SDA_0, SCL_0);
-  Wire.begin(SDA_0, SCL_0);
-  Serial.print("Wire clock ");
-  Serial.println(twoWire.getClock());
+  getAddress();
+  Serial.print("IP Address: ");
+  Serial.println(address);
+  twoWire.begin(SDA_0, SCL_0, I2C_Freq);
   scanI2C();
   wifiMethods.init();
   ArduinoOTA
@@ -623,8 +686,10 @@ void setup() {
 void loop() {
   ArduinoOTA.handle();
   for (int i=0; i<4; i++){
-    valves[i].valveData.dutyCycleCMD = sectionCmds[i]*10;
-    valves[i].updateValve();
+    if (valves[i].valveData.dutyCycleCMD != sectionCmds[i].dutyCycleCMD){
+      valves[i].valveData.dutyCycleCMD = sectionCmds[i].dutyCycleCMD;
+      valves[i].updateValve();
+    }
   }
 
   if (programStates.adsConnected){
@@ -632,7 +697,9 @@ void loop() {
   }
 
   udpMethods.udpCheck();
-  debugPrint();
-  delay(1000);
+  debugPrinter.print();
+  
+  
+  delay(3);
 }
 
