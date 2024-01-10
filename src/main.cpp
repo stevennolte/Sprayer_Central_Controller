@@ -19,12 +19,16 @@
 #include "driver/Ledc.h"
 #include <UMS3.h>
 #include "driver/gpio.h"
+#include "driver/twai.h"
 
 // CONSTANTS ///////////////////////////////////////////////////
 #define adsGain GAIN_TWOTHIRDS
 #define I2C_Freq 400000
 #define SDA_0 8
 #define SCL_0 9
+#define RX_PIN        7
+#define TX_PIN        6
+
 // #define RGB_BRIGHTNESS 100
 #define LEDC_MODE               LEDC_LOW_SPEED_MODE
 #define LEDC_DUTY_RES           LEDC_TIMER_13_BIT // Set duty resolution to 13 bits
@@ -33,6 +37,7 @@
 #define LEDC_CHANNEL2            LEDC_CHANNEL_1
 #define LEDC_CHANNEL3            LEDC_CHANNEL_2
 #define LEDC_CHANNEL4            LEDC_CHANNEL_3
+
 
 const char* ssids[] = {"SSEI","BSTRIEGEL","FERT"};
 const char* passwords[] = {"Nd14il!la","6sUDCRp5L4ps","Fert504!"};
@@ -102,12 +107,76 @@ union rowStates_u{
   uint8_t bytes[1];
 } rowStates;
 
+// INCOMMING CANBUS ///////////////////////////////////////////
+struct __attribute__ ((packed)) incommingCANflowStruct_t{
+  uint32_t flowMeasure : 32;
+  uint32_t volumeCnt : 32;
+};
+union incommingCANflow{
+incommingCANflowStruct_t incommingCANflowStruct;
+uint8_t bytes[sizeof(incommingCANflowStruct_t)];
+} incommingCANflow;
+
+struct __attribute__ ((packed)) incommingCANstatusStruct_t{
+  uint8_t magneticIssue : 1;
+  uint8_t rvsd1 : 1;
+  uint8_t powerVoltageAlarm : 1;
+  uint8_t overtemp : 1;
+  uint8_t noValidCalibration : 1;
+  uint8_t memoryAccessError : 1;
+  uint8_t rvsd2 : 1;
+  uint8_t outAstatus : 2;
+  uint8_t outBstatus : 2;
+  uint8_t rvsd3 : 4;
+  uint8_t measureActive : 1;
+  uint8_t measurePaused : 1;
+  uint8_t flowing : 1;
+  uint8_t empty : 1;
+  uint8_t rvsd4 : 1;
+  uint8_t cleanActive : 1;
+  uint8_t virtualRateEnable : 1;
+  uint8_t rvsd5 : 1;
+  uint8_t unstableMeasure : 1;
+  uint8_t flowmeterService : 1;
+  uint64_t placeholder : 39;
+};
+
+union incommingCANstatus{
+incommingCANstatusStruct_t incommingCANstatusStruct;
+uint8_t bytes[sizeof(incommingCANstatusStruct_t)];
+} incommingCANstatus;
+
+struct __attribute__ ((packed)) flowmeterCANstartupStruct_t{
+  uint8_t serialNumberDigit1 : 4;
+  uint8_t serialNumberDigit2 : 4;
+  uint8_t serialNumberDigit3 : 4;
+  uint8_t flowmeterSubtype : 4;
+  uint8_t flowmeterType : 4;
+  uint8_t placeholder : 4;
+};
+
+union flowmeterCANstartup{
+flowmeterCANstartupStruct_t flowmeterCANstartupStruct;
+uint8_t bytes[sizeof(flowmeterCANstartupStruct_t)];
+} flowmeterCANstartup;
+
 // OUTGOING UDP STRUCTS ////////////////////////////////////////
 struct sensorData_t{
   uint32_t railPressure;
 };
+
 sensorData_t sensorData;
 
+struct __attribute__ ((packed)) heartbeatStruct_t{
+  uint8_t ipAddress : 8;
+  uint8_t adsState : 2;
+  uint8_t pwmState : 2;
+};
+
+union heartbeat{
+heartbeatStruct_t heartbeatStruct;
+uint8_t bytes[sizeof(heartbeatStruct_t)];
+} heartbeat;
 
 // INTERNAL STRUCTS ////////////////////////////////////////////
 // uint16_t sectionCmds[48];
@@ -390,6 +459,9 @@ class StatusLed{
 StatusLed statusLed = StatusLed();
 
 class UDPMethods{
+  private:
+    int heartbeatTimePrevious=0;
+    int heartbeatTimeTrip=1000000;
   public:
     UDPMethods(){
     }
@@ -460,6 +532,21 @@ class UDPMethods{
       }
     }
 
+    void sendHeartbeat(){
+      if (esp_timer_get_time()-heartbeatTimePrevious > heartbeatTimeTrip){
+        heartbeat.heartbeatStruct.ipAddress = address;
+        heartbeat.heartbeatStruct.adsState = programStates.adsConnected;
+        heartbeat.heartbeatStruct.pwmState = programStates.pwmDriverConnected;
+
+        uint8_t udpSendBuffer[64];
+        for (int i=0; i<sizeof(heartbeatStruct_t);i++){
+          udpSendBuffer[i]=heartbeat.bytes[i];
+        }
+        udp.writeTo(heartbeat.bytes,sizeof(heartbeatStruct_t),IPAddress(192,168,0,255),9999);
+        heartbeatTimePrevious = esp_timer_get_time();
+      }
+    }
+
 };
 UDPMethods udpMethods = UDPMethods();
 
@@ -515,6 +602,42 @@ class ProductControl{
 
 };
 
+class CanHandler{
+  public:
+    CanHandler(){
+      twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_LISTEN_ONLY);  // TWAI_MODE_NORMAL, TWAI_MODE_NO_ACK or TWAI_MODE_LISTEN_ONLY
+      twai_timing_config_t t_config  = TWAI_TIMING_CONFIG_250KBITS();
+      twai_filter_config_t f_config  = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+      twai_driver_install(&g_config, &t_config, &f_config);
+      twai_start();
+    }
+
+    void canRecieve(){
+      twai_message_t message;
+      if (twai_receive(&message, pdMS_TO_TICKS(1)) == ESP_OK) {
+        if (message.identifier == 419389697){
+          for(int i=0;i<message.data_length_code;i++) {
+            incommingCANflow.bytes[i]=message.data[i]; 
+          }
+        }
+        if (message.identifier == 419389441){
+          for(int i=0;i<message.data_length_code;i++) {
+            incommingCANstatus.bytes[i]=message.data[i];
+            if (message.data[i]<=0x0F) {
+              Serial.print(0);
+            }
+          }
+        }
+        if (message.identifier == 418316033){
+          for (int i=0; i<sizeof(flowmeterCANstartupStruct_t); i++){
+            flowmeterCANstartup.bytes[i] = message.data[i];
+          }
+        }
+      }
+    }
+};
+CanHandler canHandler = CanHandler();
+
 void scanI2C(){
   uint8_t error = 0;
   Serial.println("Scanning...");
@@ -523,7 +646,7 @@ void scanI2C(){
     error = twoWire.endTransmission();
     if (error == 0) {
       Serial.print(address);
-      Serial.print(" ");
+      Serial.println(" found");
       switch(address){
         case 0x48:
           programStates.adsConnected=true;
@@ -553,6 +676,7 @@ void getAddress(){
   address= 37 + val;
 }
 // TIMERS //////////////////////////////////////////////////////
+
 
 class DebugPrinter{
   private:
@@ -650,10 +774,7 @@ void setup() {
 
   ArduinoOTA.begin();
   ArduinoOTA.handle();
-  // byte error, address;
-  // byte addressList[]={};
   
-
   
   
   
@@ -698,8 +819,8 @@ void loop() {
 
   udpMethods.udpCheck();
   debugPrinter.print();
-  
-  
+  canHandler.canRecieve();
+  udpMethods.sendHeartbeat();
   delay(3);
 }
 
