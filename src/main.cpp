@@ -28,6 +28,7 @@
 #define SCL_0 9
 #define RX_PIN        7
 #define TX_PIN        6
+#define CAN_POWER_PIN 38
 
 // #define RGB_BRIGHTNESS 100
 #define LEDC_MODE               LEDC_LOW_SPEED_MODE
@@ -108,6 +109,15 @@ union rowStates_u{
 } rowStates;
 
 // INCOMMING CANBUS ///////////////////////////////////////////
+struct __attribute__ ((packed)) canIDStruct_t{
+  uint32_t canID : 32;
+};
+
+union canID_u{
+canIDStruct_t canIDStruct;
+uint8_t bytes[sizeof(canIDStruct_t)];
+} canID;
+
 struct __attribute__ ((packed)) incommingCANflowStruct_t{
   uint32_t flowMeasure : 32;
   uint32_t volumeCnt : 32;
@@ -168,9 +178,22 @@ struct sensorData_t{
 sensorData_t sensorData;
 
 struct __attribute__ ((packed)) heartbeatStruct_t{
+  uint8_t aogByte1 : 8;
+  uint8_t aogByte2 : 8;
+  uint8_t aogByte3 : 8;
+  uint8_t aogHeartBeatPGN : 8;
+  uint8_t length : 8;
   uint8_t ipAddress : 8;
-  uint8_t adsState : 2;
-  uint8_t pwmState : 2;
+  uint8_t moduleState : 8;
+  uint8_t adsState : 8;
+  uint8_t pwmState : 8;
+  uint8_t udpState : 8;
+  uint8_t canFM1state : 8;
+  uint8_t canFM2state : 8;
+  uint8_t canFM3state : 8;
+  uint8_t canFM4state : 8;
+  uint8_t placeholder2 : 8;
+  uint8_t checkSum : 8;
 };
 
 union heartbeat{
@@ -196,7 +219,16 @@ struct programStates_t{
   bool pwmDriverConnected;
   bool adsConnected;
   bool udpConnected;
+  bool canFM1connected;
+  bool canFM2connected;
+  bool canFM3connected;
+  bool canFM4connected;
+  bool canFM5connected;
   uint32_t udpTimer;
+  uint8_t canFMrow1sa;
+  uint8_t canFMrow2sa;
+  uint8_t canFMrow3sa;
+  uint8_t canFMrow4sa;
   
 
 } programStates;
@@ -534,14 +566,26 @@ class UDPMethods{
 
     void sendHeartbeat(){
       if (esp_timer_get_time()-heartbeatTimePrevious > heartbeatTimeTrip){
+        heartbeat.heartbeatStruct.aogByte1 = 0x80;
+        heartbeat.heartbeatStruct.aogByte2 = 0x81;
+        heartbeat.heartbeatStruct.aogByte3 = address;
+        heartbeat.heartbeatStruct.aogHeartBeatPGN = 0x9B;
+        heartbeat.heartbeatStruct.length = sizeof(heartbeatStruct_t)-6;
         heartbeat.heartbeatStruct.ipAddress = address;
         heartbeat.heartbeatStruct.adsState = programStates.adsConnected;
         heartbeat.heartbeatStruct.pwmState = programStates.pwmDriverConnected;
-
-        uint8_t udpSendBuffer[64];
-        for (int i=0; i<sizeof(heartbeatStruct_t);i++){
-          udpSendBuffer[i]=heartbeat.bytes[i];
+        heartbeat.heartbeatStruct.canFM1state = programStates.canFM1connected;
+        heartbeat.heartbeatStruct.moduleState = programStates.udpConnected;
+        int cksum=0;
+        for (int i=2;i<=heartbeat.heartbeatStruct.length;i++)
+        {
+          cksum += heartbeat.bytes[i];
         }
+        heartbeat.heartbeatStruct.checkSum = (byte)(cksum);
+        // uint8_t udpSendBuffer[64];
+        // for (int i=0; i<sizeof(heartbeatStruct_t);i++){
+        //   udpSendBuffer[i]=heartbeat.bytes[i];
+        // }
         udp.writeTo(heartbeat.bytes,sizeof(heartbeatStruct_t),IPAddress(192,168,0,255),9999);
         heartbeatTimePrevious = esp_timer_get_time();
       }
@@ -561,13 +605,17 @@ class WifiMethods{
       int n = WiFi.scanNetworks();
       Serial.print(n);
       Serial.println(" networks found");
-      for (int i=0; i<n; i++){
+      for (int i=0; i<min(n,25); i++){
         for (int si=0; si<3;si++){
           if (WiFi.SSID(i) == ssids[si]){
             ssid = ssids[si];
             password = passwords[si];
           }
         }
+      }
+      if (ssid == ""){
+        Serial.println("No WiFi Found, REBOOTING");
+        ESP.restart();
       }
       if (!WiFi.config(local_IP, gateway, subnet)) {
               Serial.println("STA Failed to configure");
@@ -603,15 +651,79 @@ class ProductControl{
 };
 
 class CanHandler{
+  private:
+    uint16_t canFM1sn = 461;
+    uint16_t canFM2sn = 65000;
+    uint16_t canFM3sn = 65000;
+    uint16_t canFM4sn = 65000;
+    
+
   public:
     CanHandler(){
-      twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_LISTEN_ONLY);  // TWAI_MODE_NORMAL, TWAI_MODE_NO_ACK or TWAI_MODE_LISTEN_ONLY
+    //   twai_general_config_t g_config = {
+    //     .mode = TWAI_MODE_NORMAL,
+    //     .tx_io = (gpio_num_t)TX_PIN,
+    //     .rx_io = (gpio_num_t)RX_PIN,
+    //     .clkout_io = TWAI_IO_UNUSED,
+    //     .bus_off_io = TWAI_IO_UNUSED,
+    //     .tx_queue_len = 20,
+    //     .rx_queue_len = 20,
+    //     .alerts_enabled = TWAI_ALERT_NONE,
+    //     .clkout_divider = 0
+    // };
+      twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_NORMAL);  // TWAI_MODE_NORMAL, TWAI_MODE_NO_ACK or TWAI_MODE_LISTEN_ONLY
       twai_timing_config_t t_config  = TWAI_TIMING_CONFIG_250KBITS();
       twai_filter_config_t f_config  = TWAI_FILTER_CONFIG_ACCEPT_ALL();
       twai_driver_install(&g_config, &t_config, &f_config);
       twai_start();
+      uint16_t canFMsns[] = {canFM1sn};
     }
+    void checkForCanFM(){
+      Serial.println("Checking for CAN Valves");
+      pinMode(CAN_POWER_PIN, OUTPUT);
+      digitalWrite(CAN_POWER_PIN, HIGH);
+      delay(1000);
+      // twai_message_t message;
+      // uint8_t data[8] = {0,0,0,0,0,0,0,0};
+      // wakeup_message(&message, 0x18EEFF01, 8, data);
+      // transmit_message(&message);
+      // delay(2);
+      int canScanStartTime = esp_timer_get_time();
+      while (programStates.canFM1connected == false){
+        if (esp_timer_get_time()-canScanStartTime > 10000000){
+          Serial.println("No CAN Valves Found");
+          break;
+        }
+        canRecieve();
+        delay(2);
+      }
+    }
+    
+    void wakeup_message(twai_message_t *message, uint32_t id, uint8_t dlc, uint8_t *data)
+    {
+    
+      message->flags = TWAI_MSG_FLAG_EXTD;
+      message->identifier = id;
+      message->data_length_code = dlc;
+      for (int i = 0; i < dlc; i++) {
+        message->data[i] = data[i];
+      }
+      printf("Message created\nID: %ld DLC: %d Data:\t", message->identifier, message->data_length_code);
+      for (int i = 0; i < message->data_length_code; i++) {
+        printf("%d\t", message->data[i]);
+    }
+    printf("\n");
+}
 
+    void transmit_message(twai_message_t *message)
+{
+    if (twai_transmit(message, pdMS_TO_TICKS(1000)) == ESP_OK) {
+        printf("Message queued for transmission\n");
+    } else {
+        printf("Failed to send message\n");
+    }
+}
+    
     void canRecieve(){
       twai_message_t message;
       if (twai_receive(&message, pdMS_TO_TICKS(1)) == ESP_OK) {
@@ -619,18 +731,27 @@ class CanHandler{
           for(int i=0;i<message.data_length_code;i++) {
             incommingCANflow.bytes[i]=message.data[i]; 
           }
-        }
-        if (message.identifier == 419389441){
+        }else if (message.identifier == 419389441){
           for(int i=0;i<message.data_length_code;i++) {
             incommingCANstatus.bytes[i]=message.data[i];
             if (message.data[i]<=0x0F) {
-              Serial.print(0);
+              
             }
           }
-        }
-        if (message.identifier == 418316033){
+        }else {
+          canID.canIDStruct.canID = message.identifier;
+          if (canID.bytes[1] == 0xFF & canID.bytes[2] == 0xEE){
+          programStates.canFMrow1sa = canID.bytes[0];
+          
+          
           for (int i=0; i<sizeof(flowmeterCANstartupStruct_t); i++){
             flowmeterCANstartup.bytes[i] = message.data[i];
+          }
+          int flowmeterSerialNum = flowmeterCANstartup.flowmeterCANstartupStruct.serialNumberDigit3*100+flowmeterCANstartup.flowmeterCANstartupStruct.serialNumberDigit2*10+flowmeterCANstartup.flowmeterCANstartupStruct.serialNumberDigit1;
+          switch(flowmeterSerialNum){
+            case 461:
+              programStates.canFM1connected = true;
+          }
           }
         }
       }
@@ -680,7 +801,7 @@ void getAddress(){
 
 class DebugPrinter{
   private:
-    int debugTimePrevious=0;
+    uint64_t debugTimePrevious=0;
     int debugTimeTrip=1000000;
 
   public:
@@ -696,22 +817,24 @@ class DebugPrinter{
     }
     void topDebug(){
       
-        Serial.print("Target Rate ");
+        Serial.print("TarRate ");
         Serial.print(cmdData.targetRate);
-        Serial.print(" speed "+String(cmdData.avgSpeed));
+        Serial.print(" spd "+String(cmdData.avgSpeed));
         Serial.print(" ");
         Serial.print(" Rows Active: ");
         Serial.print(cmdData.rowsActive);
-        Serial.print(" UDPcheck ");
+        Serial.print(" UDP ");
         Serial.print(programStates.udpConnected);
-        Serial.print(" ADS State ");
+        Serial.print(" ADS ");
         Serial.print(programStates.adsConnected);
-        Serial.print(" Voltage Reading ");
+        Serial.print(" Volt ");
         Serial.print(reportData.voltage1);
-        Serial.print(" row4 duty ");
-        Serial.print(valves[3].valveData.dutyCycleCMD);
-        Serial.print(" row4 freq ");
-        Serial.print(valves[3].valveData.frequencyCMD);
+        // Serial.print(" row4 duty ");
+        // Serial.print(valves[3].valveData.dutyCycleCMD);
+        // Serial.print(" row4 freq ");
+        // Serial.print(valves[3].valveData.frequencyCMD);
+        Serial.print(" CANfm1 ");
+        Serial.print(programStates.canFM1connected);
         Serial.println();
         
       
@@ -774,16 +897,6 @@ void setup() {
 
   ArduinoOTA.begin();
   ArduinoOTA.handle();
-  
-  
-  
-  
-  
-  // statusLed.init();
-  Serial.println("OTA enabled");
-
-  
-  Serial.println("Wifi enabled");
   udpMethods.init();
 
   if (programStates.pwmDriverConnected){
@@ -800,6 +913,7 @@ void setup() {
   for (int i=0; i<4; i++){
     valves[i].init();
   }
+  canHandler.checkForCanFM();
   ums3.setPixelColor(UMS3::color(72,245,66));
     
 }
