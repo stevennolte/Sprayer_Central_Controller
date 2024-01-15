@@ -257,6 +257,10 @@ struct reportData_t{
   uint16_t voltage2;
   uint16_t voltage3;
   uint16_t voltage4;
+  uint16_t freq1;
+  uint16_t freq2;
+  uint16_t freq3;
+  uint16_t freq4;
 } reportData;
 
 void IRAM_ATTR rgbTimer() {      //Defining Inerrupt function with IRAM_ATTR for faster access
@@ -400,24 +404,68 @@ Valve valves[4] = {Valve(12,LEDC_CHANNEL1), Valve(13,LEDC_CHANNEL2),Valve(14,LED
 
 
 class PWMDriver{
+  private:
+    
+    // sectionCmdPins_t section1CmdPins;
+    
+    
+    struct sectionCmdPins_t{
+      uint8_t powerPin;
+      uint8_t directionPin;
+    };
+    sectionCmdPins_t sectionCmdPins[5];
+    
+    uint8_t pumpNum = 0;
+    uint8_t bypassOpen = 1;
+    uint8_t bypassClose = 2;
+    uint16_t pumpCmdPrev = 0;
+    
+    uint16_t prevSectionCmds[5];
+    uint16_t section1CmdPrev = 0;
+    uint16_t sectiom2CmdPrev = 1;
+    uint16_t section3CmdPrev = 2;
+    uint16_t section4CmdPrev = 3;
+    uint16_t section5CmdPrev = 4;
+    
   public:
     PWMDriver(){
     }
+    uint16_t pumpCmd=0;
+    uint16_t sectionCmds[5] = {0,0,0,0,0};
+    uint16_t section1Cmd = 0;     //for bi-directional functions, the command is 0-65535 with 0-32767 being close and 32768-65535 bing open
+    uint16_t section2Cmd = 1;
+    uint16_t section3Cmd = 2;
+    uint16_t section4Cmd = 3;
+    uint16_t section5Cmd = 4;
+    Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40, twoWire);
+    
     void init(){
-      
-      
            //default address 0x40
-        Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40, twoWire);
+        
         pwm.begin();
         pwm.setOscillatorFrequency(27000000);
-        pwm.setPWMFreq(150);
-        pwm.setPWM(1, 4096, 0);
-
-        // pwm.setPWMFreq(150);
-        // programStates.pwmDriverConnected = true;
-      
-
+        pwm.setPWMFreq(150); 
+        sectionCmdPins[0].powerPin = 3;
+        sectionCmdPins[0].directionPin = 4;
+        sectionCmdPins[1].powerPin = 5;
+        sectionCmdPins[1].directionPin = 6;
+        sectionCmdPins[2].powerPin = 7;
+        sectionCmdPins[2].directionPin = 8;
     } 
+
+    void updateSectionValves(){
+      for (uint8_t i=0; i<5; i++){
+        if (prevSectionCmds[i] != sectionCmds[i]){
+          int tempCmd = sectionCmds[i]*0.125002 - 4096;
+          if (tempCmd < 0){
+            pwm.setPWM(sectionCmdPins[i].directionPin,0, 4096);
+          } else {
+            pwm.setPWM(sectionCmdPins[i].directionPin, 4096, 0);
+          }
+          pwm.setPWM(sectionCmdPins[i].powerPin, 0, 4096-tempCmd);
+        }
+      }
+    }
 };
 PWMDriver pwmDriver = PWMDriver();
 
@@ -527,8 +575,10 @@ class UDPMethods{
             case 154:
               
               for (int i=0; i<cmdData.numOfsections; i++){
-                sectionCmds[i].dutyCycleCMD = packet.data()[i*2+5]*256+packet.data()[i*2+6];
-                
+                uint16_t cmd =packet.data()[i*2+5]*256+packet.data()[i*2+6];
+                if (cmd < 60000){
+                  sectionCmds[i].dutyCycleCMD = cmd;
+                }
               }
               
               break;
@@ -575,9 +625,10 @@ class UDPMethods{
         heartbeat.heartbeatStruct.adsState = programStates.adsConnected;
         heartbeat.heartbeatStruct.pwmState = programStates.pwmDriverConnected;
         heartbeat.heartbeatStruct.canFM1state = programStates.canFM1connected;
+        heartbeat.heartbeatStruct.canFM2state = programStates.canFM2connected;
         heartbeat.heartbeatStruct.moduleState = programStates.udpConnected;
         int cksum=0;
-        for (int i=2;i<=heartbeat.heartbeatStruct.length;i++)
+        for (int i=2;i<=heartbeat.heartbeatStruct.length+1;i++)
         {
           cksum += heartbeat.bytes[i];
         }
@@ -653,24 +704,18 @@ class ProductControl{
 class CanHandler{
   private:
     uint16_t canFM1sn = 461;
-    uint16_t canFM2sn = 65000;
+    uint16_t canFM2sn = 460;
     uint16_t canFM3sn = 65000;
     uint16_t canFM4sn = 65000;
+    uint64_t canFM1timer = 0;
+    uint64_t canFM2timer = 0;
+    uint64_t canFM3timer = 0;
+    uint64_t canFM4timer = 0;
     
 
   public:
     CanHandler(){
-    //   twai_general_config_t g_config = {
-    //     .mode = TWAI_MODE_NORMAL,
-    //     .tx_io = (gpio_num_t)TX_PIN,
-    //     .rx_io = (gpio_num_t)RX_PIN,
-    //     .clkout_io = TWAI_IO_UNUSED,
-    //     .bus_off_io = TWAI_IO_UNUSED,
-    //     .tx_queue_len = 20,
-    //     .rx_queue_len = 20,
-    //     .alerts_enabled = TWAI_ALERT_NONE,
-    //     .clkout_divider = 0
-    // };
+    
       twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)TX_PIN, (gpio_num_t)RX_PIN, TWAI_MODE_NORMAL);  // TWAI_MODE_NORMAL, TWAI_MODE_NO_ACK or TWAI_MODE_LISTEN_ONLY
       twai_timing_config_t t_config  = TWAI_TIMING_CONFIG_250KBITS();
       twai_filter_config_t f_config  = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -678,22 +723,18 @@ class CanHandler{
       twai_start();
       uint16_t canFMsns[] = {canFM1sn};
     }
+    
+    
     void checkForCanFM(){
       Serial.println("Checking for CAN Valves");
+      
       pinMode(CAN_POWER_PIN, OUTPUT);
+      digitalWrite(CAN_POWER_PIN, LOW);
+      delay(2000);
       digitalWrite(CAN_POWER_PIN, HIGH);
       delay(1000);
-      // twai_message_t message;
-      // uint8_t data[8] = {0,0,0,0,0,0,0,0};
-      // wakeup_message(&message, 0x18EEFF01, 8, data);
-      // transmit_message(&message);
-      // delay(2);
       int canScanStartTime = esp_timer_get_time();
-      while (programStates.canFM1connected == false){
-        if (esp_timer_get_time()-canScanStartTime > 10000000){
-          Serial.println("No CAN Valves Found");
-          break;
-        }
+      while (esp_timer_get_time()-canScanStartTime > 10000000){
         canRecieve();
         delay(2);
       }
@@ -723,38 +764,67 @@ class CanHandler{
         printf("Failed to send message\n");
     }
 }
-    
+    void checkCAN(){
+      if (esp_timer_get_time() - canFM1timer > 1000000){
+        programStates.canFM1connected = false;
+      }
+      if (esp_timer_get_time() - canFM2timer > 1000000){
+        programStates.canFM2connected = false;
+      }
+    }
+
     void canRecieve(){
       twai_message_t message;
       if (twai_receive(&message, pdMS_TO_TICKS(1)) == ESP_OK) {
-        if (message.identifier == 419389697){
-          for(int i=0;i<message.data_length_code;i++) {
-            incommingCANflow.bytes[i]=message.data[i]; 
-          }
-        }else if (message.identifier == 419389441){
-          for(int i=0;i<message.data_length_code;i++) {
-            incommingCANstatus.bytes[i]=message.data[i];
-            if (message.data[i]<=0x0F) {
+        // if (message.identifier == 419389697){
+        //   // Serial.println(message.identifier, HEX);
+          
+
+        // }else if (message.identifier == 419389441){
+        //   // Serial.println(message.identifier, HEX);
+          
+        //   for(int i=0;i<message.data_length_code;i++) {
+        //     incommingCANstatus.bytes[i]=message.data[i];
+        //     if (message.data[i]<=0x0F) {
               
-            }
-          }
-        }else {
+        //     }
+        //   }
+        //   canFM2timer = esp_timer_get_time();
+
+        // }else {
+          
           canID.canIDStruct.canID = message.identifier;
           if (canID.bytes[1] == 0xFF & canID.bytes[2] == 0xEE){
-          programStates.canFMrow1sa = canID.bytes[0];
-          
-          
-          for (int i=0; i<sizeof(flowmeterCANstartupStruct_t); i++){
-            flowmeterCANstartup.bytes[i] = message.data[i];
-          }
-          int flowmeterSerialNum = flowmeterCANstartup.flowmeterCANstartupStruct.serialNumberDigit3*100+flowmeterCANstartup.flowmeterCANstartupStruct.serialNumberDigit2*10+flowmeterCANstartup.flowmeterCANstartupStruct.serialNumberDigit1;
-          switch(flowmeterSerialNum){
-            case 461:
-              programStates.canFM1connected = true;
-          }
+            for (int i=0; i<sizeof(flowmeterCANstartupStruct_t); i++){
+              flowmeterCANstartup.bytes[i] = message.data[i];
+            }
+            int flowmeterSerialNum = flowmeterCANstartup.flowmeterCANstartupStruct.serialNumberDigit3*100+flowmeterCANstartup.flowmeterCANstartupStruct.serialNumberDigit2*10+flowmeterCANstartup.flowmeterCANstartupStruct.serialNumberDigit1;
+            switch(flowmeterSerialNum){
+              case 461:
+                Serial.print("461 ");
+                Serial.println(message.identifier, HEX);
+                programStates.canFM1connected = true;
+                programStates.canFMrow1sa = canID.bytes[0];
+              case 460:
+                Serial.print("460 ");
+                Serial.println(message.identifier, HEX);
+                programStates.canFM2connected = true;
+                programStates.canFMrow2sa = canID.bytes[0];
+            }
+          } else if (canID.bytes[1] == 0xEE & canID.bytes[2] == 0xFF & canID.bytes[0] == programStates.canFMrow1sa){
+            for(int i=0;i<message.data_length_code;i++) {
+              incommingCANflow.bytes[i]=message.data[i]; 
+            }
+            canFM1timer = esp_timer_get_time();
+          } else if (canID.bytes[1] == 0xEE & canID.bytes[2] == 0xFF & canID.bytes[0] == programStates.canFMrow2sa){
+            for(int i=0;i<message.data_length_code;i++) {
+              incommingCANflow.bytes[i]=message.data[i]; 
+            }
+            canFM2timer = esp_timer_get_time();
           }
         }
-      }
+      // }
+      // checkCAN();
     }
 };
 CanHandler canHandler = CanHandler();
@@ -781,11 +851,6 @@ void scanI2C(){
 void getAddress(){
   
   uint8_t val=0;
-  // gpio_config_t gpioConfig;
-  // gpioConfig.mode = GPIO_MODE_INPUT;
-  // gpioConfig.pin_bit_mask = (1U<<42);
-  
-  // gpio_config(&gpioConfig);
   
   for (int i = 0; i < 4; i++){
     pinMode(addressPins[i], INPUT);
@@ -835,6 +900,8 @@ class DebugPrinter{
         // Serial.print(valves[3].valveData.frequencyCMD);
         Serial.print(" CANfm1 ");
         Serial.print(programStates.canFM1connected);
+        Serial.print(" CANfm2 ");
+        Serial.print(programStates.canFM2connected);
         Serial.println();
         
       
@@ -935,6 +1002,6 @@ void loop() {
   debugPrinter.print();
   canHandler.canRecieve();
   udpMethods.sendHeartbeat();
-  delay(3);
+  delay(10);
 }
 
