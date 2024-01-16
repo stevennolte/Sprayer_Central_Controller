@@ -573,11 +573,12 @@ class UDPMethods{
               break;
 
             case 154:
-              
-              for (int i=0; i<cmdData.numOfsections; i++){
-                uint16_t cmd =packet.data()[i*2+5]*256+packet.data()[i*2+6];
-                if (cmd < 60000){
-                  sectionCmds[i].dutyCycleCMD = cmd;
+              if (packet.data()[5] == 1){
+                for (int i=0; i<cmdData.numOfsections; i++){
+                  uint16_t cmd =packet.data()[i*2+7]*256+packet.data()[i*2+8];
+                  if (cmd < 60000){
+                    sectionCmds[i].dutyCycleCMD = cmd;
+                  }
                 }
               }
               
